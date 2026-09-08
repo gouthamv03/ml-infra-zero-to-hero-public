@@ -1,0 +1,4 @@
+.DS_Store
+data/story_embeddings.npy
+.claude/
+.vscode/

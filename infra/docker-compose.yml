@@ -1,0 +1,172 @@
+services:
+  # CORE — always up from episode 1 onward
+  postgres:
+    image: postgres:16
+    profiles: ["core"]
+    environment:
+      POSTGRES_USER: mlinfra
+      POSTGRES_PASSWORD: mlinfra
+      POSTGRES_DB: mlinfra
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    profiles: ["core"]
+    ports:
+      - "6379:6379"
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    profiles: ["core"]
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  # STORAGE-DEEP-DIVE — on-demand, only during episodes that need them (ep 3)
+  cassandra:
+    image: cassandra:4
+    profiles: ["storage-deep-dive"]
+    ports:
+      - "9042:9042"
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+
+  neo4j:
+    image: neo4j:5
+    profiles: ["storage-deep-dive"]
+    environment:
+      NEO4J_AUTH: neo4j/mlinfra123
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+
+  elasticsearch:
+    image: elasticsearch:8.13.0
+    profiles: ["storage-deep-dive"]
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+
+  # STREAMING — introduced in episode 7
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    profiles: ["streaming"]
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    profiles: ["streaming"]
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  flink-jobmanager:
+    image: flink:1.18
+    profiles: ["streaming"]
+    ports:
+      - "8081:8081"
+    command: jobmanager
+    environment:
+      - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
+
+  flink-taskmanager:
+    image: flink:1.18
+    profiles: ["streaming"]
+    depends_on:
+      - flink-jobmanager
+    command: taskmanager
+    environment:
+      - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
+
+  # APP — our own services, added as built
+  ranking-service:
+    build: ../src/ranking_service
+    profiles: ["app"]
+    depends_on:
+      - postgres
+      - redis
+      - qdrant
+    ports:
+      - "8000:8000"
+
+  feature-store:
+    build: ../src/feature_store
+    profiles: ["app"]
+    depends_on:
+      - postgres
+      - redis
+    ports:
+      - "8001:8001"
+
+  training-service:
+    build: ../src/training_service
+    profiles: ["app"]
+    depends_on:
+      - postgres
+    environment:
+      - POSTGRES_DSN=postgresql://mlinfra:mlinfra@postgres:5432/mlinfra
+      - ARTIFACTS_DIR=/data/model_artifacts
+      - IMPRESSIONS_PATH=/data/impressions.parquet
+    volumes:
+      - model_artifacts:/data/model_artifacts
+      - ../data:/data:ro
+    ports:
+      - "8004:8004"
+
+  inference-service:
+    build: ../src/inference_service
+    profiles: ["app"]
+    depends_on:
+      - postgres
+    environment:
+      - POSTGRES_DSN=postgresql://mlinfra:mlinfra@postgres:5432/mlinfra
+    volumes:
+      - model_artifacts:/data/model_artifacts
+    expose:
+      - "8002"
+
+  # SCALING — introduced in episode 9
+  # Usage: docker compose --profile core --profile app --profile scaling up --scale inference-service=2
+  nginx-lb:
+    image: nginx:alpine
+    profiles: ["scaling"]
+    depends_on:
+      - inference-service
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "8010:80"   # port 8010 so it doesn't clash with direct inference-service on 8002
+
+  joiner:
+    build: ../src/joiner
+    profiles: ["app"]
+    depends_on:
+      - kafka
+    ports:
+      - "8003:8003"
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  cassandra_data:
+  neo4j_data:
+  es_data:
+  model_artifacts:
